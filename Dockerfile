@@ -9,21 +9,43 @@ ARG ADMIN_PASSWORD
 ARG SERVICE_URL_FRONTEND
 ARG SERVICE_FQDN_FRONTEND
 
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    build-essential \
+    pkg-config \
+    libffi-dev \
+    libcairo2 \
+    libcairo2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 USER frappe
 WORKDIR /home/frappe/frappe-bench
 
-# Install payments dependency for LMS.
-# Use develop because payments does not currently have a normal version-16 branch.
-RUN set -eux; \
-    bench get-app https://github.com/frappe/payments.git --branch develop
+# Payments dependency for LMS.
+RUN bench get-app https://github.com/frappe/payments.git --branch develop
 
-# Copy this repository as the LMS app.
+# Copy current repo as LMS app.
 COPY --chown=frappe:frappe . /home/frappe/frappe-bench/apps/lms
 
-# Install Python requirements for LMS and build assets.
+# Safety: if Coolify did not clone git submodules, clone frappe-ui manually.
 RUN set -eux; \
-    pip install -e /home/frappe/frappe-bench/apps/lms; \
-    bench build --app lms
+    if [ ! -f /home/frappe/frappe-bench/apps/lms/frappe-ui/package.json ]; then \
+      echo "frappe-ui submodule missing, cloning it manually..."; \
+      rm -rf /home/frappe/frappe-bench/apps/lms/frappe-ui; \
+      git clone https://github.com/frappe/frappe-ui /home/frappe/frappe-bench/apps/lms/frappe-ui; \
+    else \
+      echo "frappe-ui exists."; \
+    fi
+
+# Install LMS Python package.
+RUN pip install -e /home/frappe/frappe-bench/apps/lms
+
+# Build only LMS frontend assets.
+RUN bench build --app lms
 
 USER frappe
 WORKDIR /home/frappe/frappe-bench
