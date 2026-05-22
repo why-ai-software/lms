@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libffi-dev \
+    libxml2-dev \
+    libxslt1-dev \
     libcairo2 \
     libcairo2-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -25,11 +27,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 USER frappe
 WORKDIR /home/frappe/frappe-bench
 
-# Payments dependency for LMS.
+# Debug versions in Coolify logs
+RUN node --version && yarn --version && python --version && bench --version
+
+# Install payments dependency for LMS.
 RUN bench get-app https://github.com/frappe/payments.git --branch develop
 
 # Copy current repo as LMS app.
 COPY --chown=frappe:frappe . /home/frappe/frappe-bench/apps/lms
+
+# Register LMS app in bench, because COPY does not do what bench get-app normally does.
+RUN set -eux; \
+    grep -qxF "lms" sites/apps.txt || echo "lms" >> sites/apps.txt; \
+    cat sites/apps.txt
 
 # Safety: if Coolify did not clone git submodules, clone frappe-ui manually.
 RUN set -eux; \
@@ -44,8 +54,10 @@ RUN set -eux; \
 # Install LMS Python package.
 RUN pip install -e /home/frappe/frappe-bench/apps/lms
 
-# Build only LMS frontend assets.
-RUN bench build --app lms
+# Build LMS assets with better error visibility.
+RUN set -eux; \
+    bench build --app lms 2>&1 | tee /tmp/lms-build.log || \
+    (echo "===== LMS BUILD FAILED ====="; cat /tmp/lms-build.log; exit 1)
 
 USER frappe
 WORKDIR /home/frappe/frappe-bench
