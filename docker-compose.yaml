@@ -1,32 +1,184 @@
-version: "3.7"
-name: lms
+name: frappe-lms
+
+x-frappe-image: &frappe_image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: frappe-lms-custom:latest
+  restart: unless-stopped
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+
 services:
-  mariadb:
-    image: mariadb:10.8
+  db:
+    image: mariadb:11.8
+    restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --skip-character-set-client-handshake
-      - --skip-innodb-read-only-compressed # Temporary fix for MariaDB 10.6
     environment:
-      MYSQL_ROOT_PASSWORD: 123
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root-password}
+      MARIADB_AUTO_UPGRADE: "1"
     volumes:
-      - mariadb-data:/var/lib/mysql
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
-  redis:
-    image: redis:alpine
+  redis-cache:
+    image: redis:8.0-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-  frappe:
-    image: frappe/bench:latest
-    command: bash /workspace/init.sh
+  redis-queue:
+    image: redis:8.0-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-queue-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  configurator:
+    <<: *frappe_image
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host db;
+        bench set-config -gp db_port 3306;
+        bench set-config -g redis_cache "redis://redis-cache:6379";
+        bench set-config -g redis_queue "redis://redis-queue:6379";
+        bench set-config -g redis_socketio "redis://redis-queue:6379";
+        bench set-config -gp socketio_port 9000;
+        bench set-config -g chromium_path /usr/bin/chromium-headless-shell;
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+
+  create-site:
+    <<: *frappe_image
+    restart: "no"
+    entrypoint: ["bash", "-c"]
     environment:
-      - SHELL=/bin/bash
-    working_dir: /home/frappe
-    volumes:
-      - .:/workspace
+      SITE_NAME: ${SITE_NAME:-lms.localhost}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root-password}
+    command:
+      - |
+        set -e
+
+        if [ -f "sites/$$SITE_NAME/site_config.json" ]; then
+          echo "Site $$SITE_NAME already exists. Skipping site creation."
+          exit 0
+        fi
+
+        echo "Creating site $$SITE_NAME..."
+
+        bench new-site "$$SITE_NAME" \
+          --mariadb-user-host-login-scope="%" \
+          --admin-password="$$ADMIN_PASSWORD" \
+          --db-root-username=root \
+          --db-root-password="$$MYSQL_ROOT_PASSWORD" \
+          --no-mariadb-socket
+
+        bench --site "$$SITE_NAME" install-app payments
+        bench --site "$$SITE_NAME" install-app lms
+        bench --site "$$SITE_NAME" set-config developer_mode 0
+        bench --site "$$SITE_NAME" clear-cache
+        bench use "$$SITE_NAME"
+
+        echo "Site $$SITE_NAME created."
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+
+  backend:
+    <<: *frappe_image
+    environment:
+      GUNICORN_THREADS: 4
+      GUNICORN_WORKERS: 2
+      GUNICORN_TIMEOUT: 120
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      create-site:
+        condition: service_completed_successfully
+
+  frontend:
+    <<: *frappe_image
+    command: nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: ${SITE_NAME:-lms.localhost}
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 120
+      CLIENT_MAX_BODY_SIZE: 50m
     ports:
-      - 8088:8000
-      - 9000:9000
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_started
+      websocket:
+        condition: service_started
+
+  websocket:
+    <<: *frappe_image
+    command: node /home/frappe/frappe-bench/apps/frappe/socketio.js
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      create-site:
+        condition: service_completed_successfully
+
+  queue-short:
+    <<: *frappe_image
+    command: bench worker --queue short,default
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      create-site:
+        condition: service_completed_successfully
+
+  queue-long:
+    <<: *frappe_image
+    command: bench worker --queue long,default,short
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      create-site:
+        condition: service_completed_successfully
+
+  scheduler:
+    <<: *frappe_image
+    command: bench schedule
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      create-site:
+        condition: service_completed_successfully
 
 volumes:
-  mariadb-data:
+  db-data:
+  redis-queue-data:
+  sites:
+  logs:
