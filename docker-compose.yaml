@@ -25,10 +25,10 @@ services:
       - db-data:/var/lib/mysql
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      start_period: 10s
+      start_period: 20s
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 30
 
   redis-cache:
     image: redis:8.0-alpine
@@ -37,7 +37,7 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
   redis-queue:
     image: redis:8.0-alpine
@@ -48,22 +48,34 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
   configurator:
     <<: *frappe_image
     restart: "no"
     entrypoint: ["bash", "-c"]
     command:
-      - >
-        ls -1 apps > sites/apps.txt;
-        bench set-config -g db_host db;
-        bench set-config -gp db_port 3306;
-        bench set-config -g redis_cache "redis://redis-cache:6379";
-        bench set-config -g redis_queue "redis://redis-queue:6379";
-        bench set-config -g redis_socketio "redis://redis-queue:6379";
-        bench set-config -gp socketio_port 9000;
-        bench set-config -g chromium_path /usr/bin/chromium-headless-shell;
+      - |
+        set -e
+
+        echo "Checking installed apps..."
+        ls -la apps
+        ls -la apps/lms
+        /home/frappe/frappe-bench/env/bin/python -c "import lms; print('LMS import OK:', lms.__file__)"
+
+        echo "Writing apps.txt..."
+        ls -1 apps > sites/apps.txt
+        cat sites/apps.txt
+
+        echo "Writing global site config..."
+        bench set-config -g db_host db
+        bench set-config -gp db_port 3306
+        bench set-config -g redis_cache "redis://redis-cache:6379"
+        bench set-config -g redis_queue "redis://redis-queue:6379"
+        bench set-config -g redis_socketio "redis://redis-queue:6379"
+        bench set-config -gp socketio_port 9000
+
+        echo "Configurator finished."
     depends_on:
       db:
         condition: service_healthy
@@ -84,6 +96,8 @@ services:
       - |
         set -e
 
+        echo "Using site: $$SITE_NAME"
+
         if [ -f "sites/$$SITE_NAME/site_config.json" ]; then
           echo "Site $$SITE_NAME already exists. Skipping site creation."
           exit 0
@@ -98,13 +112,17 @@ services:
           --db-root-password="$$MYSQL_ROOT_PASSWORD" \
           --no-mariadb-socket
 
+        echo "Installing payments..."
         bench --site "$$SITE_NAME" install-app payments
+
+        echo "Installing lms..."
         bench --site "$$SITE_NAME" install-app lms
+
         bench --site "$$SITE_NAME" set-config developer_mode 0
         bench --site "$$SITE_NAME" clear-cache
         bench use "$$SITE_NAME"
 
-        echo "Site $$SITE_NAME created."
+        echo "Site $$SITE_NAME created successfully."
     depends_on:
       configurator:
         condition: service_completed_successfully
