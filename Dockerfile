@@ -32,15 +32,14 @@ WORKDIR /home/frappe/frappe-bench
 RUN node --version && yarn --version && python --version && bench --version
 
 # Install payments dependency for LMS.
-# payments currently does not have the same stable version-16 branch flow as Frappe/ERPNext,
-# so develop is safer for Frappe v16/LMS right now.
+# For Frappe v16 / LMS, payments develop is currently safer than version-16.
 RUN bench get-app https://github.com/frappe/payments.git --branch develop
 
 # Copy this repository as the LMS app.
 COPY --chown=frappe:frappe . /home/frappe/frappe-bench/apps/lms
 
 # Register LMS in bench apps list.
-# This is needed because COPY does not behave like "bench get-app".
+# COPY does not do what "bench get-app" normally does.
 RUN set -eux; \
     grep -qxF "lms" sites/apps.txt || echo "lms" >> sites/apps.txt; \
     cat sites/apps.txt
@@ -55,17 +54,28 @@ RUN set -eux; \
       echo "frappe-ui exists."; \
     fi
 
-# IMPORTANT:
 # Install LMS into the actual bench virtualenv.
-# Do not use plain "pip install", because runtime uses /home/frappe/frappe-bench/env.
 RUN /home/frappe/frappe-bench/env/bin/pip install -e /home/frappe/frappe-bench/apps/lms
 
 # Validate that the runtime Python can import LMS.
 RUN /home/frappe/frappe-bench/env/bin/python -c "import lms; print('LMS import OK:', lms.__file__)"
 
-# Build LMS assets.
+# Validate required LMS frontend files.
 RUN set -eux; \
-    bench build --app lms
+    test -f /home/frappe/frappe-bench/apps/lms/package.json; \
+    test -f /home/frappe/frappe-bench/apps/lms/frontend/package.json; \
+    test -f /home/frappe/frappe-bench/apps/lms/frontend/vite.config.js; \
+    node --version; \
+    yarn --version
+
+# Build LMS frontend explicitly.
+# We do this instead of "bench build --app lms" because Coolify was hiding the real build error.
+RUN set -eux; \
+    cd /home/frappe/frappe-bench/apps/lms; \
+    yarn install --check-files --network-timeout 100000 --ignore-engines; \
+    cd /home/frappe/frappe-bench/apps/lms/frontend; \
+    yarn install --check-files --network-timeout 100000 --ignore-engines; \
+    yarn build
 
 USER frappe
 WORKDIR /home/frappe/frappe-bench

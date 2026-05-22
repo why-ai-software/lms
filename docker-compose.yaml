@@ -75,6 +75,27 @@ services:
         bench set-config -g redis_socketio "redis://redis-queue:6379"
         bench set-config -gp socketio_port 9000
 
+        echo "Preparing assets symlinks..."
+        mkdir -p sites/assets
+
+        if [ -d apps/frappe/frappe/public ]; then
+          ln -sfn /home/frappe/frappe-bench/apps/frappe/frappe/public sites/assets/frappe
+        fi
+
+        if [ -d apps/erpnext/erpnext/public ]; then
+          ln -sfn /home/frappe/frappe-bench/apps/erpnext/erpnext/public sites/assets/erpnext
+        fi
+
+        if [ -d apps/payments/payments/public ]; then
+          ln -sfn /home/frappe/frappe-bench/apps/payments/payments/public sites/assets/payments
+        fi
+
+        if [ -d apps/lms/lms/public ]; then
+          ln -sfn /home/frappe/frappe-bench/apps/lms/lms/public sites/assets/lms
+        fi
+
+        ls -la sites/assets
+
         echo "Configurator finished."
     depends_on:
       db:
@@ -129,6 +150,7 @@ services:
 
   backend:
     <<: *frappe_image
+    command: bench serve --port 8000
     environment:
       GUNICORN_THREADS: 4
       GUNICORN_WORKERS: 2
